@@ -102,7 +102,7 @@ variable "k3s_controller_memory" {
 variable "k3s_controller_disk_size" {
   description = "Disk size for controller"
   type        = string
-  default     = "38G"
+  default     = "30G"
 }
 
 # k3s Worker Nodes
@@ -145,7 +145,7 @@ variable "k3s_worker_memory" {
 variable "k3s_worker_disk_size" {
   description = "Disk size for workers"
   type        = string
-  default     = "38G"
+  default     = "30G"
 }
 
 # k3s Configuration

@@ -22,7 +22,7 @@ k3s_controller_hostname = "k3s-c01"
 k3s_controller_ip       = "192.168.86.100"
 k3s_controller_cores    = 4
 k3s_controller_memory   = 4096
-k3s_controller_disk_size = "38G"
+k3s_controller_disk_size = "30G"
 
 # k3s Worker Configuration
 k3s_worker_count         = 2
@@ -31,7 +31,7 @@ k3s_worker_hostname_prefix = "k3s-a"
 k3s_worker_ips           = ["192.168.86.101", "192.168.86.102"]
 k3s_worker_cores         = 4
 k3s_worker_memory        = 4096
-k3s_worker_disk_size     = "38G"
+k3s_worker_disk_size     = "30G"
 
 # k3s Configuration
 k3s_version = "v1.31.4+k3s1"

@@ -75,24 +75,16 @@ resource "proxmox_virtual_environment_container" "k3s_controller" {
     nesting = true
   }
   
-  # Critical settings for k3s to work in LXC
-  mount_point {
-    volume = "proc"
-    path   = "/proc"
+  console {
+    enabled   = true
+    type      = "console"
+    tty_count = 2
   }
   
-  mount_point {
-    volume = "sys"
-    path   = "/sys"
-  }
+  # Run as privileged container for k3s
+  unprivileged = false
   
-  # These configurations are set via the API after creation
-  lifecycle {
-    ignore_changes = [
-      disk,
-      initialization,
-    ]
-  }
+  unprivileged = false
   
   startup {
     order      = 1
@@ -102,7 +94,7 @@ resource "proxmox_virtual_environment_container" "k3s_controller" {
   
   tags = ["k3s", "controller"]
   
-  started = true
+  started = false  # Start after configuration
 }
 
 # k3s Worker Nodes
@@ -161,23 +153,14 @@ resource "proxmox_virtual_environment_container" "k3s_workers" {
     nesting = true
   }
   
-  # Critical settings for k3s to work in LXC
-  mount_point {
-    volume = "proc"
-    path   = "/proc"
+  console {
+    enabled   = true
+    type      = "console"
+    tty_count = 2
   }
   
-  mount_point {
-    volume = "sys"
-    path   = "/sys"
-  }
-  
-  lifecycle {
-    ignore_changes = [
-      disk,
-      initialization,
-    ]
-  }
+  # Run as privileged container for k3s
+  unprivileged = false
   
   startup {
     order      = 2
@@ -187,44 +170,94 @@ resource "proxmox_virtual_environment_container" "k3s_workers" {
   
   tags = ["k3s", "worker"]
   
-  started = true
+  started = false  # Start after configuration
   
   depends_on = [proxmox_virtual_environment_container.k3s_controller]
 }
 
-# Apply additional LXC configuration via SSH
-resource "null_resource" "configure_lxc_controller" {
+# Apply additional LXC configuration via Proxmox API file manipulation
+resource "proxmox_virtual_environment_file" "lxc_controller_config" {
   depends_on = [proxmox_virtual_environment_container.k3s_controller]
+  
+  node_name    = var.proxmox_node
+  datastore_id = "local"
+  
+  content_type = "snippets"
+  
+  source_raw {
+    data = <<-EOT
+      lxc.apparmor.profile: unconfined
+      lxc.cgroup2.devices.allow: a
+      lxc.cap.drop:
+      lxc.mount.auto: proc:rw sys:rw
+    EOT
+    
+    file_name = "k3s-controller-${var.k3s_controller_vmid}.conf"
+  }
+}
+
+# Apply config via provisioner (still needed for appending to LXC config)
+resource "null_resource" "configure_lxc_controller" {
+  depends_on = [
+    proxmox_virtual_environment_container.k3s_controller,
+    proxmox_virtual_environment_file.lxc_controller_config
+  ]
   
   provisioner "local-exec" {
     command = <<-EOT
-      ssh -o StrictHostKeyChecking=no ${var.proxmox_ssh_user}@${trimprefix(var.proxmox_api_url, "https://")} \
-        "pct set ${var.k3s_controller_vmid} \
-          -features nesting=1 \
-          --unprivileged 0 && \
-         echo 'lxc.apparmor.profile: unconfined' >> /etc/pve/lxc/${var.k3s_controller_vmid}.conf && \
-         echo 'lxc.cgroup2.devices.allow: a' >> /etc/pve/lxc/${var.k3s_controller_vmid}.conf && \
-         echo 'lxc.cap.drop:' >> /etc/pve/lxc/${var.k3s_controller_vmid}.conf && \
-         echo 'lxc.mount.auto: proc:rw sys:rw' >> /etc/pve/lxc/${var.k3s_controller_vmid}.conf"
+      ssh -o StrictHostKeyChecking=no ${var.proxmox_ssh_user}@${replace(var.proxmox_api_url, "https://", "")} \
+        "cat /var/lib/vz/snippets/k3s-controller-${var.k3s_controller_vmid}.conf >> /etc/pve/lxc/${var.k3s_controller_vmid}.conf && \
+         pct start ${var.k3s_controller_vmid}"
     EOT
+  }
+  
+  provisioner "local-exec" {
+    when    = destroy
+    command = "echo 'Controller config cleanup'"
+  }
+}
+
+resource "proxmox_virtual_environment_file" "lxc_worker_config" {
+  count = var.k3s_worker_count
+  
+  depends_on = [proxmox_virtual_environment_container.k3s_workers]
+  
+  node_name    = var.proxmox_node
+  datastore_id = "local"
+  
+  content_type = "snippets"
+  
+  source_raw {
+    data = <<-EOT
+      lxc.apparmor.profile: unconfined
+      lxc.cgroup2.devices.allow: a
+      lxc.cap.drop:
+      lxc.mount.auto: proc:rw sys:rw
+    EOT
+    
+    file_name = "k3s-worker-${var.k3s_worker_vmid_start + count.index}.conf"
   }
 }
 
 resource "null_resource" "configure_lxc_workers" {
-  count      = var.k3s_worker_count
-  depends_on = [proxmox_virtual_environment_container.k3s_workers]
+  count = var.k3s_worker_count
+  
+  depends_on = [
+    proxmox_virtual_environment_container.k3s_workers,
+    proxmox_virtual_environment_file.lxc_worker_config
+  ]
   
   provisioner "local-exec" {
     command = <<-EOT
-      ssh -o StrictHostKeyChecking=no ${var.proxmox_ssh_user}@${trimprefix(var.proxmox_api_url, "https://")} \
-        "pct set ${var.k3s_worker_vmid_start + count.index} \
-          -features nesting=1 \
-          --unprivileged 0 && \
-         echo 'lxc.apparmor.profile: unconfined' >> /etc/pve/lxc/${var.k3s_worker_vmid_start + count.index}.conf && \
-         echo 'lxc.cgroup2.devices.allow: a' >> /etc/pve/lxc/${var.k3s_worker_vmid_start + count.index}.conf && \
-         echo 'lxc.cap.drop:' >> /etc/pve/lxc/${var.k3s_worker_vmid_start + count.index}.conf && \
-         echo 'lxc.mount.auto: proc:rw sys:rw' >> /etc/pve/lxc/${var.k3s_worker_vmid_start + count.index}.conf"
+      ssh -o StrictHostKeyChecking=no ${var.proxmox_ssh_user}@${replace(var.proxmox_api_url, "https://", "")} \
+        "cat /var/lib/vz/snippets/k3s-worker-${var.k3s_worker_vmid_start + count.index}.conf >> /etc/pve/lxc/${var.k3s_worker_vmid_start + count.index}.conf && \
+         pct start ${var.k3s_worker_vmid_start + count.index}"
     EOT
+  }
+  
+  provisioner "local-exec" {
+    when    = destroy
+    command = "echo 'Worker config cleanup'"
   }
 }
 

@@ -20,17 +20,17 @@ Automated deployment of a k3s Kubernetes cluster on Proxmox using LXC containers
 │  ┌───────────────────────────────────┐  │
 │  │  k3s-c01 (Controller)             │  │
 │  │  192.168.86.100                   │  │
-│  │  4 cores, 4GB RAM, 38GB disk      │  │
+│  │  4 cores, 4GB RAM, 30GB disk      │  │
 │  └───────────────────────────────────┘  │
 │  ┌───────────────────────────────────┐  │
 │  │  k3s-a01 (Worker)                 │  │
 │  │  192.168.86.101                   │  │
-│  │  4 cores, 4GB RAM, 38GB disk      │  │
+│  │  4 cores, 4GB RAM, 30GB disk      │  │
 │  └───────────────────────────────────┘  │
 │  ┌───────────────────────────────────┐  │
 │  │  k3s-a02 (Worker)                 │  │
 │  │  192.168.86.102                   │  │
-│  │  4 cores, 4GB RAM, 38GB disk      │  │
+│  │  4 cores, 4GB RAM, 30GB disk      │  │
 │  └───────────────────────────────────┘  │
 └─────────────────────────────────────────┘
 ```
@@ -144,7 +144,7 @@ If you prefer to use bash scripts without Terraform:
 ### 1. Create LXC Containers Manually
 
 Create 3 Ubuntu 24.04 LXC containers via Proxmox UI or CLI with:
-- 4 cores, 4GB RAM, 38GB disk
+- 4 cores, 4GB RAM, 30GB disk
 - Static IPs: 192.168.86.100, 192.168.86.101, 192.168.86.102
 - Enable nesting
 
@@ -152,9 +152,9 @@ Create 3 Ubuntu 24.04 LXC containers via Proxmox UI or CLI with:
 
 ```bash
 # On Proxmox host, run for each container
-./scripts/configure-lxc.sh 110 k3s-c01
-./scripts/configure-lxc.sh 111 k3s-a01
-./scripts/configure-lxc.sh 112 k3s-a02
+./scripts/manual/configure-lxc.sh 110 k3s-c01
+./scripts/manual/configure-lxc.sh 111 k3s-a01
+./scripts/manual/configure-lxc.sh 112 k3s-a02
 
 # Restart containers
 pct stop 110 && pct start 110
@@ -167,17 +167,17 @@ pct stop 112 && pct start 112
 ```bash
 # On controller (192.168.86.100)
 ssh root@192.168.86.100
-curl -sfL https://raw.githubusercontent.com/your-repo/main/scripts/install-k3s-controller.sh | bash
+K3S_VERSION=v1.31.4+k3s1 K3S_TOKEN=$(openssl rand -hex 32) bash < scripts/manual/install-k3s-controller.sh
 
 # Get the token
-K3S_TOKEN=$(cat /var/lib/rancher/k3s/server/node-token)
+K3S_TOKEN=$(ssh root@192.168.86.100 cat /var/lib/rancher/k3s/server/node-token)
 
 # On each worker
 ssh root@192.168.86.101
-K3S_URL=https://192.168.86.100:6443 K3S_TOKEN=$K3S_TOKEN bash < install-k3s-worker.sh
+K3S_URL=https://192.168.86.100:6443 K3S_TOKEN=$K3S_TOKEN bash < scripts/manual/install-k3s-worker.sh
 
 ssh root@192.168.86.102
-K3S_URL=https://192.168.86.100:6443 K3S_TOKEN=$K3S_TOKEN bash < install-k3s-worker.sh
+K3S_URL=https://192.168.86.100:6443 K3S_TOKEN=$K3S_TOKEN bash < scripts/manual/install-k3s-worker.sh
 ```
 
 ## LXC Configuration for k3s
@@ -204,11 +204,15 @@ lxc.mount.auto: proc:rw sys:rw
 ├── terraform.tfvars.example  # Example variables file
 ├── .gitignore
 └── scripts/
-    ├── configure-lxc.sh          # Configure LXC for k3s
-    ├── install-k3s-controller.sh # Install k3s server
-    ├── install-k3s-worker.sh     # Install k3s agent
-    ├── uninstall-k3s.sh          # Uninstall k3s
-    └── deploy-cluster.sh         # Manual deployment script
+    ├── check-cluster.sh      # Check cluster health
+    ├── get-kubeconfig.sh     # Retrieve kubeconfig
+    ├── uninstall-k3s.sh      # Uninstall k3s
+    └── manual/               # Manual deployment scripts (not used by Terraform)
+        ├── README.md
+        ├── configure-lxc.sh
+        ├── deploy-cluster.sh
+        ├── install-k3s-controller.sh
+        └── install-k3s-worker.sh
 ```
 
 ## Useful Commands
