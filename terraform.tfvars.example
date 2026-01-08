@@ -1,34 +1,35 @@
 # Proxmox Configuration
 proxmox_api_url      = "https://192.168.86.10:8006"  # Your Proxmox server
-proxmox_api_user     = "root@pam"
+proxmox_api_user     = "root@pam"  # Use root@pam for password auth (API tokens have limitations with privileged containers)
 proxmox_api_password = "your-proxmox-password"
 proxmox_insecure     = true
 proxmox_ssh_user     = "root"
 proxmox_node         = "proxmox"
 
 # Storage Configuration
-storage_pool    = "local-lxc"  # Or "truenas" based on your setup
-network_bridge  = "vmbr0"
-gateway         = "192.168.86.1"
-nameserver      = "8.8.8.8"
+template_storage = "local"      # For templates/ISOs (must support vztmpl content type)
+storage_pool     = "truenas"    # For container disks (use local-lvm, truenas, or similar)
+network_bridge   = "vmbr0"
+gateway          = "192.168.86.1"
+nameserver       = "8.8.8.8"
 
 # SSH Configuration
 ssh_public_key = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQ... your-key-here"
-root_password  = "your-root-password"
+root_password  = "your-root-password"  # Password for LXC containers
 
 # k3s Controller Configuration
-k3s_controller_vmid     = 110
-k3s_controller_hostname = "k3s-c01"
-k3s_controller_ip       = "192.168.86.100"
+k3s_controller_vmid     = 210
+k3s_controller_hostname = "k3s-controller-01"
+k3s_controller_ip       = "192.168.86.30"
 k3s_controller_cores    = 4
 k3s_controller_memory   = 4096
 k3s_controller_disk_size = "30G"
 
 # k3s Worker Configuration
 k3s_worker_count         = 2
-k3s_worker_vmid_start    = 111
-k3s_worker_hostname_prefix = "k3s-a"
-k3s_worker_ips           = ["192.168.86.101", "192.168.86.102"]
+k3s_worker_vmid_start    = 211
+k3s_worker_hostname_prefix = "k3s-worker-"
+k3s_worker_ips           = ["192.168.86.31", "192.168.86.32"]
 k3s_worker_cores         = 4
 k3s_worker_memory        = 4096
 k3s_worker_disk_size     = "30G"

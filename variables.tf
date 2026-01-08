@@ -34,9 +34,15 @@ variable "proxmox_node" {
 }
 
 variable "storage_pool" {
-  description = "Storage pool for LXC containers"
+  description = "Storage pool for LXC container disks (e.g., local-lvm, truenas)"
   type        = string
-  default     = "local-lxc"
+  default     = "local-lvm"
+}
+
+variable "template_storage" {
+  description = "Storage pool for templates and ISOs"
+  type        = string
+  default     = "local"
 }
 
 variable "network_bridge" {

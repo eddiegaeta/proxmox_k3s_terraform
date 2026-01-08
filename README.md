@@ -12,6 +12,26 @@ Automated deployment of a k3s Kubernetes cluster on Proxmox using LXC containers
 - ✅ **Static IP addressing**
 - ✅ **SSH key authentication**
 
+## LXC Configuration for k3s
+
+The LXC containers are configured with special settings required for running Kubernetes:
+
+```bash
+lxc.apparmor.profile: unconfined       # Disable AppArmor restrictions
+lxc.cgroup2.devices.allow: a            # Allow all device access
+lxc.cap.drop:                           # Keep all capabilities
+lxc.mount.auto: proc:rw sys:rw          # Mount proc and sys as read-write
+lxc.mount.entry: /dev/kmsg dev/kmsg none bind,optional,create=file  # Mount /dev/kmsg for kubelet
+```
+
+**Important**: Kernel modules must be loaded on the Proxmox host (not in containers):
+- `br_netfilter` - Bridge netfilter support
+- `overlay` - Overlay filesystem
+- `ip_tables` - IP tables support
+- `iptable_nat` - NAT support
+
+These are automatically loaded during deployment via the main.tf configuration.
+
 ## Architecture
 
 ```
@@ -50,13 +70,25 @@ unzip terraform_1.6.6_linux_amd64.zip
 sudo mv terraform /usr/local/bin/
 ```
 
-2. **SSH access** to Proxmox host configured
+2. **sshpass** (for password-based SSH automation)
+```bash
+# macOS
+brew install esolitos/ipa/sshpass
+
+# Linux
+sudo apt-get install sshpass  # Debian/Ubuntu
+sudo yum install sshpass      # RHEL/CentOS
+```
+
+3. **SSH access** to Proxmox host configured
 
 ### On Proxmox Host
 
-1. **Proxmox VE 9.1.4+** (for OCI image support)
-2. **API user with appropriate permissions**
-3. **Storage pool** for LXC containers (e.g., `local-lxc`, `truenas`)
+1. **Proxmox VE 8.0+** (tested on 9.1.4)
+2. **Root password authentication** (API tokens have limitations with privileged containers)
+3. **Storage pools**:
+   - Storage for templates (e.g., `local`) - must support `vztmpl` content type
+   - Storage for container disks (e.g., `local-lvm`, `truenas`) - must support container directories
 4. **Network bridge** configured (e.g., `vmbr0`)
 
 ## Quick Start
@@ -80,9 +112,13 @@ nano terraform.tfvars
 
 ```hcl
 proxmox_api_url      = "https://your-proxmox-ip:8006"
+proxmox_api_user     = "root@pam"  # Must use root@pam for privileged containers
 proxmox_api_password = "your-password"
 proxmox_node         = "proxmox"  # Your node name
-storage_pool         = "local-lxc"  # Your storage
+
+# Storage configuration - separate storage for templates and containers
+template_storage = "local"      # For templates (must support vztmpl)
+storage_pool     = "truenas"    # For container disks (or local-lvm)
 
 # Add your SSH public key
 ssh_public_key = "ssh-rsa AAAAB3NzaC1yc2E..."
@@ -95,8 +131,8 @@ gateway    = "192.168.86.1"
 nameserver = "8.8.8.8"
 
 # Adjust IPs, hostnames, resources as needed
-k3s_controller_ip = "192.168.86.100"
-k3s_worker_ips = ["192.168.86.101", "192.168.86.102"]  # Specify each worker IP
+k3s_controller_ip = "192.168.86.30"
+k3s_worker_ips = ["192.168.86.31", "192.168.86.32"]
 ```
 
 ### 3. Deploy with Terraform
@@ -123,14 +159,14 @@ The deployment will:
 
 ```bash
 # SSH to controller
-ssh root@192.168.86.100
+ssh root@192.168.86.30
 
 # Check cluster status
 kubectl get nodes -o wide
 
 # Get kubeconfig (from local machine)
-ssh root@192.168.86.100 "cat /etc/rancher/k3s/k3s.yaml" > kubeconfig.yaml
-# Edit kubeconfig.yaml and replace 127.0.0.1 with 192.168.86.100
+ssh root@192.168.86.30 "cat /etc/rancher/k3s/k3s.yaml" > kubeconfig.yaml
+# Edit kubeconfig.yaml and replace 127.0.0.1 with 192.168.86.30
 
 # Use kubectl locally
 export KUBECONFIG=./kubeconfig.yaml
@@ -145,39 +181,39 @@ If you prefer to use bash scripts without Terraform:
 
 Create 3 Ubuntu 24.04 LXC containers via Proxmox UI or CLI with:
 - 4 cores, 4GB RAM, 30GB disk
-- Static IPs: 192.168.86.100, 192.168.86.101, 192.168.86.102
+- Static IPs: 192.168.86.30, 192.168.86.31, 192.168.86.32
 - Enable nesting
 
 ### 2. Configure LXC for k3s
 
 ```bash
 # On Proxmox host, run for each container
-./scripts/manual/configure-lxc.sh 110 k3s-c01
-./scripts/manual/configure-lxc.sh 111 k3s-a01
-./scripts/manual/configure-lxc.sh 112 k3s-a02
+./scripts/manual/configure-lxc.sh 210 k3s-c01
+./scripts/manual/configure-lxc.sh 211 k3s-a01
+./scripts/manual/configure-lxc.sh 212 k3s-a02
 
 # Restart containers
-pct stop 110 && pct start 110
-pct stop 111 && pct start 111
-pct stop 112 && pct start 112
+pct stop 210 && pct start 210
+pct stop 211 && pct start 211
+pct stop 212 && pct start 212
 ```
 
 ### 3. Install k3s
 
 ```bash
-# On controller (192.168.86.100)
-ssh root@192.168.86.100
+# On controller (192.168.86.30)
+ssh root@192.168.86.30
 K3S_VERSION=v1.31.4+k3s1 K3S_TOKEN=$(openssl rand -hex 32) bash < scripts/manual/install-k3s-controller.sh
 
 # Get the token
-K3S_TOKEN=$(ssh root@192.168.86.100 cat /var/lib/rancher/k3s/server/node-token)
+K3S_TOKEN=$(ssh root@192.168.86.30 cat /var/lib/rancher/k3s/server/node-token)
 
 # On each worker
-ssh root@192.168.86.101
-K3S_URL=https://192.168.86.100:6443 K3S_TOKEN=$K3S_TOKEN bash < scripts/manual/install-k3s-worker.sh
+ssh root@192.168.86.31
+K3S_URL=https://192.168.86.30:6443 K3S_TOKEN=$K3S_TOKEN bash < scripts/manual/install-k3s-worker.sh
 
-ssh root@192.168.86.102
-K3S_URL=https://192.168.86.100:6443 K3S_TOKEN=$K3S_TOKEN bash < scripts/manual/install-k3s-worker.sh
+ssh root@192.168.86.32
+K3S_URL=https://192.168.86.30:6443 K3S_TOKEN=$K3S_TOKEN bash < scripts/manual/install-k3s-worker.sh
 ```
 
 ## LXC Configuration for k3s
@@ -190,7 +226,10 @@ lxc.apparmor.profile: unconfined
 lxc.cgroup2.devices.allow: a
 lxc.cap.drop:
 lxc.mount.auto: proc:rw sys:rw
+lxc.mount.entry: /dev/kmsg dev/kmsg none bind,optional,create=file
 ```
+
+**Note**: Kernel modules (`br_netfilter`, `overlay`, `ip_tables`, `iptable_nat`) are automatically loaded on the Proxmox host during deployment.
 
 ## Project Structure
 
@@ -227,14 +266,14 @@ terraform output -raw k3s_token  # Get cluster token
 
 # Proxmox
 pct list                    # List containers
-pct config 110              # Show container config
-pct stop 110 && pct start 110  # Restart container
-pct enter 110               # Enter container console
+pct config 210              # Show container config
+pct stop 210 && pct start 210  # Restart container
+pct enter 210               # Enter container console
 
 # k3s
 kubectl get nodes -o wide   # Check cluster status
 kubectl get pods -A         # List all pods
-kubectl describe node k3s-c01  # Node details
+kubectl describe node k3s-controller-01  # Node details
 
 # Uninstall k3s (on nodes)
 /usr/local/bin/k3s-uninstall.sh        # On controller
@@ -271,24 +310,66 @@ k3s_version = "v1.30.1+k3s1"
 k3s_controller_ip = "10.0.0.10"
 k3s_worker_ips = ["10.0.0.11", "10.0.0.12"]  # Non-sequential IPs supported
 gateway = "10.0.0.1"
+
+# Update hostnames if needed
+k3s_controller_hostname = "k3s-c01"
+k3s_worker_hostnames = ["k3s-w01", "k3s-w02"]
+
+# Update VMIDs if needed
+k3s_controller_vmid = 210
+k3s_worker_vmids = [211, 212]
 ```
 
 ## Troubleshooting
 
+### Authentication Errors (401/403/500)
+**Issue**: Terraform fails with API authentication errors.
+**Solution**: Use `root@pam` with password authentication, not API tokens. Privileged containers require full root access.
+
+```hcl
+# In terraform.tfvars
+proxmox_api_user     = "root@pam"
+proxmox_api_password = "your-password"
+```
+
+### Storage Not Found
+**Issue**: Error like `storage "local-lxc" doesn't exist`.
+**Solution**: Verify storage names in Proxmox and update `terraform.tfvars`:
+- `template_storage` must support `vztmpl` content (usually `local`)
+- `storage_pool` must support container directories (e.g., `local-lvm`, `truenas`)
+
+### kubelet Fails with "/dev/kmsg: no such file or directory"
+**Issue**: k3s kubelet cannot start.
+**Solution**: The `/dev/kmsg` device must be bind-mounted from host. This is automatically configured in `main.tf` via:
+```
+lxc.mount.entry: /dev/kmsg dev/kmsg none bind,optional,create=file
+```
+If manual setup, add this line to `/etc/pve/lxc/<vmid>.conf` and restart the container.
+
+### Kernel Module Errors (modprobe failures)
+**Issue**: Errors about `br_netfilter`, `overlay` modules.
+**Solution**: Load modules on Proxmox host, not in containers:
+```bash
+# On Proxmox host
+modprobe br_netfilter overlay ip_tables iptable_nat
+echo -e "br_netfilter\noverlay\nip_tables\niptable_nat" > /etc/modules-load.d/k3s.conf
+```
+The deployment automatically handles this.
+
 ### Container won't start
 ```bash
 # Check logs
-pct status 110
+pct status 210
 journalctl -xe
 
 # Verify LXC config
-pct config 110
+pct config 210
 ```
 
 ### k3s installation fails
 ```bash
 # Check inside container
-pct enter 110
+pct enter 210
 systemctl status k3s
 journalctl -u k3s -f
 ```
@@ -296,8 +377,8 @@ journalctl -u k3s -f
 ### Workers not joining
 ```bash
 # Verify token and connectivity
-ssh root@192.168.86.101
-curl -k https://192.168.86.100:6443
+ssh root@192.168.86.31
+curl -k https://192.168.86.30:6443
 systemctl status k3s-agent
 journalctl -u k3s-agent -f
 ```
@@ -308,6 +389,10 @@ journalctl -u k3s-agent -f
 iptables -L
 # k3s uses ports: 6443 (API), 10250 (kubelet)
 ```
+
+### SSH Connection Issues
+**Issue**: Cannot SSH to containers.
+**Solution**: Ensure `sshpass` is installed locally and SSH server is configured in containers. The deployment handles this automatically.
 
 ## Security Considerations
 
