@@ -29,3 +29,8 @@ Thumbs.db
 *.pem
 *.key
 id_rsa*
+
+# Kubeconfig (contains cluster admin credentials)
+kubeconfig.yaml
+kubeconfig*.yaml
+*.kubeconfig

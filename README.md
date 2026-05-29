@@ -8,13 +8,16 @@ Automated deployment of a k3s Kubernetes cluster on Proxmox using LXC containers
 - ✅ **1 Control Plane + 2 Worker Nodes** (configurable)
 - ✅ **Terraform-managed** infrastructure as code
 - ✅ **Automated k3s installation** via scripts
+- ✅ **Fail-fast install** — install steps run with `set -eo pipefail` and verify the `k3s` binary + service before reporting success, so a failed install fails the `apply` instead of silently passing
+- ✅ **No false drift** — containers use `lifecycle { ignore_changes = [started] }` so re-running `apply` never tries to stop a healthy node
+- ✅ **One-command kubeconfig** — `scripts/get-kubeconfig.sh --merge` pulls and merges the cluster into `~/.kube/config`
 - ✅ **Proper LXC configuration** for k3s compatibility
 - ✅ **Static IP addressing**
 - ✅ **SSH key authentication**
 
 ## LXC Configuration for k3s
 
-The LXC containers are configured with special settings required for running Kubernetes:
+The LXC containers run privileged with `features: nesting=1`, plus these settings (applied to `/etc/pve/lxc/<vmid>.conf` on the host) required for running Kubernetes:
 
 ```bash
 lxc.apparmor.profile: unconfined       # Disable AppArmor restrictions
@@ -36,24 +39,26 @@ These are automatically loaded during deployment via the main.tf configuration.
 
 ```
 ┌─────────────────────────────────────────┐
-│         Proxmox Host (9.1.4+)           │
-│  ┌───────────────────────────────────┐  │
-│  │  k3s-c01 (Controller)             │  │
-│  │  192.168.86.100                   │  │
-│  │  4 cores, 4GB RAM, 30GB disk      │  │
-│  └───────────────────────────────────┘  │
-│  ┌───────────────────────────────────┐  │
-│  │  k3s-a01 (Worker)                 │  │
-│  │  192.168.86.101                   │  │
-│  │  4 cores, 4GB RAM, 30GB disk      │  │
-│  └───────────────────────────────────┘  │
-│  ┌───────────────────────────────────┐  │
-│  │  k3s-a02 (Worker)                 │  │
-│  │  192.168.86.102                   │  │
-│  │  4 cores, 4GB RAM, 30GB disk      │  │
-│  └───────────────────────────────────┘  │
+│         Proxmox Host (9.1.4+)            │
+│  ┌───────────────────────────────────┐   │
+│  │  k3s-controller-01  (CT 210)      │   │
+│  │  192.168.86.30                    │   │
+│  │  4 cores, 4GB RAM, 30GB disk      │   │
+│  └───────────────────────────────────┘   │
+│  ┌───────────────────────────────────┐   │
+│  │  k3s-worker-01  (CT 211)          │   │
+│  │  192.168.86.31                    │   │
+│  │  4 cores, 4GB RAM, 30GB disk      │   │
+│  └───────────────────────────────────┘   │
+│  ┌───────────────────────────────────┐   │
+│  │  k3s-worker-02  (CT 212)          │   │
+│  │  192.168.86.32                    │   │
+│  │  4 cores, 4GB RAM, 30GB disk      │   │
+│  └───────────────────────────────────┘   │
 └─────────────────────────────────────────┘
 ```
+
+> Default IPs/VMIDs shown above; all are configurable in `terraform.tfvars`. Workers are created from a `k3s_worker_count` + `k3s_worker_vmid_start` base, and the controller is started **stopped** then brought up by the LXC-config provisioner (see "How deployment works" below).
 
 ## Prerequisites
 
@@ -150,28 +155,63 @@ terraform apply
 
 The deployment will:
 1. Download Ubuntu 24.04 LTS template
-2. Create 3 LXC containers (1 controller, 2 workers)
-3. Configure containers with k3s-compatible settings
-4. Install k3s on all nodes
-5. Join workers to the cluster
+2. Create 3 LXC containers (1 controller, 2 workers) — created **stopped**
+3. Configure containers with k3s-compatible settings, then start them
+4. Install k3s on the controller (verifying the binary + service before continuing)
+5. Install k3s-agent on each worker and join them to the cluster (also verified)
 
 ### 4. Access Your Cluster
 
+The easiest way to get a working local `kubectl` is the helper script. It pulls the
+kubeconfig from the controller, rewrites the server address from `127.0.0.1` to the
+controller IP, and (with `--merge`) merges it into `~/.kube/config` under a named context.
+
 ```bash
-# SSH to controller
-ssh root@192.168.86.30
+# Merge into ~/.kube/config as context "k3s-home" and switch to it
+./scripts/get-kubeconfig.sh 192.168.86.30 --merge
 
-# Check cluster status
 kubectl get nodes -o wide
-
-# Get kubeconfig (from local machine)
-ssh root@192.168.86.30 "cat /etc/rancher/k3s/k3s.yaml" > kubeconfig.yaml
-# Edit kubeconfig.yaml and replace 127.0.0.1 with 192.168.86.30
-
-# Use kubectl locally
-export KUBECONFIG=./kubeconfig.yaml
-kubectl get nodes
 ```
+
+Other modes:
+
+```bash
+# Standalone file instead of merging (writes ./kubeconfig.yaml)
+./scripts/get-kubeconfig.sh 192.168.86.30
+export KUBECONFIG=$(pwd)/kubeconfig.yaml
+
+# Custom context name when merging
+./scripts/get-kubeconfig.sh 192.168.86.30 --merge --context homelab
+```
+
+> ⚠️ `kubeconfig.yaml` contains your cluster's **admin credentials** and is git-ignored.
+> Don't commit it. The `--merge` flow backs up your existing `~/.kube/config` to
+> `~/.kube/config.bak` and chmods the result to `600`.
+
+You can also just SSH in directly:
+
+```bash
+ssh root@192.168.86.30
+kubectl get nodes -o wide
+```
+
+### How deployment works (and why)
+
+A few non-obvious design points worth knowing before you re-run things:
+
+- **Containers are created `started = false`.** The k3s-specific LXC settings
+  (`apparmor`, `cgroup2.devices`, `/dev/kmsg` mount) are written to the container's
+  `.conf` on the Proxmox host, then the container is started via `pct start`. Starting
+  it *after* the config is what makes k3s work.
+- **`lifecycle { ignore_changes = [started] }`** is set on both container resources.
+  Once the provisioners start a container, its real state is `started = true`, which
+  would otherwise conflict with the `started = false` in config and make every later
+  `apply` try to stop the node (the bpg provider errors with `no options specified`).
+  Ignoring that field keeps applies idempotent.
+- **Install steps fail loudly.** The controller/worker install provisioners run with
+  `set -eo pipefail` and explicitly check `command -v k3s` and `systemctl is-active`
+  before exiting 0. If an install half-fails, the `apply` fails — you won't get a
+  "successful" run with a node missing the `k3s` binary.
 
 ## Manual Deployment (Without Terraform)
 
@@ -188,9 +228,9 @@ Create 3 Ubuntu 24.04 LXC containers via Proxmox UI or CLI with:
 
 ```bash
 # On Proxmox host, run for each container
-./scripts/manual/configure-lxc.sh 210 k3s-c01
-./scripts/manual/configure-lxc.sh 211 k3s-a01
-./scripts/manual/configure-lxc.sh 212 k3s-a02
+./scripts/manual/configure-lxc.sh 210 k3s-controller-01
+./scripts/manual/configure-lxc.sh 211 k3s-worker-01
+./scripts/manual/configure-lxc.sh 212 k3s-worker-02
 
 # Restart containers
 pct stop 210 && pct start 210
@@ -216,21 +256,6 @@ ssh root@192.168.86.32
 K3S_URL=https://192.168.86.30:6443 K3S_TOKEN=$K3S_TOKEN bash < scripts/manual/install-k3s-worker.sh
 ```
 
-## LXC Configuration for k3s
-
-These settings are critical for k3s to work in LXC containers:
-
-```
-features: nesting=1
-lxc.apparmor.profile: unconfined
-lxc.cgroup2.devices.allow: a
-lxc.cap.drop:
-lxc.mount.auto: proc:rw sys:rw
-lxc.mount.entry: /dev/kmsg dev/kmsg none bind,optional,create=file
-```
-
-**Note**: Kernel modules (`br_netfilter`, `overlay`, `ip_tables`, `iptable_nat`) are automatically loaded on the Proxmox host during deployment.
-
 ## Project Structure
 
 ```
@@ -244,7 +269,7 @@ lxc.mount.entry: /dev/kmsg dev/kmsg none bind,optional,create=file
 ├── .gitignore
 └── scripts/
     ├── check-cluster.sh      # Check cluster health
-    ├── get-kubeconfig.sh     # Retrieve kubeconfig
+    ├── get-kubeconfig.sh     # Retrieve kubeconfig (supports --merge into ~/.kube/config)
     ├── uninstall-k3s.sh      # Uninstall k3s
     └── manual/               # Manual deployment scripts (not used by Terraform)
         ├── README.md
@@ -269,6 +294,11 @@ pct list                    # List containers
 pct config 210              # Show container config
 pct stop 210 && pct start 210  # Restart container
 pct enter 210               # Enter container console
+
+# Kubeconfig (local)
+./scripts/get-kubeconfig.sh 192.168.86.30 --merge   # merge into ~/.kube/config (context k3s-home)
+./scripts/get-kubeconfig.sh 192.168.86.30           # write standalone ./kubeconfig.yaml
+./scripts/get-kubeconfig.sh --help                  # all options
 
 # k3s
 kubectl get nodes -o wide   # Check cluster status
@@ -311,16 +341,80 @@ k3s_controller_ip = "10.0.0.10"
 k3s_worker_ips = ["10.0.0.11", "10.0.0.12"]  # Non-sequential IPs supported
 gateway = "10.0.0.1"
 
-# Update hostnames if needed
-k3s_controller_hostname = "k3s-c01"
-k3s_worker_hostnames = ["k3s-w01", "k3s-w02"]
+# Update hostnames if needed (workers are <prefix>NN, e.g. k3s-worker-01)
+k3s_controller_hostname    = "k3s-controller-01"
+k3s_worker_hostname_prefix = "k3s-worker-"
 
-# Update VMIDs if needed
-k3s_controller_vmid = 210
-k3s_worker_vmids = [211, 212]
+# Update VMIDs if needed (workers are assigned start, start+1, ...)
+k3s_controller_vmid   = 210
+k3s_worker_vmid_start = 211
 ```
 
+## Rebuilding the Cluster (destroy + apply)
+
+Tearing the cluster down and standing it back up is common in a homelab. A clean cycle is:
+
+```bash
+terraform destroy
+terraform apply
+./scripts/get-kubeconfig.sh 192.168.86.30 --merge   # refresh local kubeconfig
+```
+
+**Callouts for rebuilds** — these bit us and are easy to hit again:
+
+- **SSH host keys change.** New containers get new host keys, so `ssh`/`kubectl`-over-SSH
+  will fail with `REMOTE HOST IDENTIFICATION HAS CHANGED`. Clear the old key per node:
+  ```bash
+  ssh-keygen -R 192.168.86.30   # repeat for .31, .32
+  ```
+  `get-kubeconfig.sh` does this automatically for the controller.
+- **The k3s token regenerates if it's not pinned.** When `k3s_token` is empty, Terraform
+  generates a random one and stores it **only in state**. If state is lost/reset, a new
+  token is generated and any pre-existing workers can no longer join. To avoid this, pin a
+  fixed token in `terraform.tfvars`:
+  ```hcl
+  k3s_token = "your-long-fixed-shared-secret"
+  ```
+- **Always `destroy` before deleting containers by hand.** If you delete containers in the
+  Proxmox UI without updating state (or a partial apply leaves them out of state), the next
+  `apply` fails with `CT <id> already exists` (see Troubleshooting). Prefer `terraform destroy`.
+
 ## Troubleshooting
+
+### `CT <id> already exists on node`
+**Issue**: `apply` fails to create a container whose VMID already exists on Proxmox —
+typically an orphan left by a partial apply or a manual deletion that didn't update state.
+**Solution**: Remove the orphaned container on the Proxmox host, then re-apply:
+```bash
+# On the Proxmox host
+pct stop <id>  && pct destroy <id>
+```
+If the container *should* be managed but isn't in state, you can instead
+`terraform import` it — but for worker nodes a destroy/recreate is usually cleaner because
+a fresh node picks up the current k3s token automatically.
+
+### `error updating container: ... no options specified` (started drift)
+**Issue**: `apply` errors trying to modify the controller, showing `started = true -> false`.
+**Cause**: The container is running (started by the provisioner) but config says
+`started = false`, so Terraform tries a `started`-only update, which the bpg provider rejects.
+**Solution**: Already handled — both container resources set
+`lifecycle { ignore_changes = [started] }`. If you removed that block, add it back.
+
+### `REMOTE HOST IDENTIFICATION HAS CHANGED` after a rebuild
+**Issue**: SSH refuses to connect to a recreated node.
+**Solution**: The host key changed with the new container. Clear the stale entry:
+```bash
+ssh-keygen -R 192.168.86.30   # repeat per node IP
+```
+
+### Install reported success but a node has no `k3s` binary
+This should no longer happen — install steps now `set -eo pipefail` and verify
+`command -v k3s` + the service before exiting 0, so a failed install fails the `apply`.
+If you see it on an older state, re-run the install for that node:
+```bash
+terraform taint null_resource.install_k3s_controller   # or install_k3s_workers[N]
+terraform apply
+```
 
 ### Authentication Errors (401/403/500)
 **Issue**: Terraform fails with API authentication errors.
@@ -399,7 +493,7 @@ iptables -L
 1. **Change default passwords** in `terraform.tfvars`
 2. **Use SSH keys** instead of password authentication
 3. **Firewall rules** - restrict access to k3s API (port 6443)
-4. **Keep secrets secure** - don't commit `terraform.tfvars`
+4. **Keep secrets secure** - `terraform.tfvars`, `terraform.tfstate` (contains the k3s token), and `kubeconfig.yaml` (cluster admin creds) are all git-ignored. Don't commit them.
 5. **Update regularly** - use recent k3s versions
 
 ## References

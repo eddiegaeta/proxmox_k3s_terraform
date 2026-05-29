@@ -3,10 +3,10 @@ resource "proxmox_virtual_environment_download_file" "ubuntu_template" {
   node_name    = var.proxmox_node
   content_type = "vztmpl"
   datastore_id = var.template_storage
-  
+
   url = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64-root.tar.xz"
-  
-  overwrite          = false
+
+  overwrite           = false
   overwrite_unmanaged = false
 }
 
@@ -26,157 +26,170 @@ resource "proxmox_virtual_environment_container" "k3s_controller" {
   description = "k3s Control Plane Node"
   node_name   = var.proxmox_node
   vm_id       = var.k3s_controller_vmid
-  
+
   initialization {
     hostname = var.k3s_controller_hostname
-    
+
     ip_config {
       ipv4 {
         address = "${var.k3s_controller_ip}/24"
         gateway = var.gateway
       }
     }
-    
+
     dns {
       servers = [var.nameserver]
     }
-    
+
     user_account {
       keys     = [var.ssh_public_key]
       password = var.root_password
     }
   }
-  
+
   network_interface {
     name   = "eth0"
     bridge = var.network_bridge
   }
-  
+
   operating_system {
     template_file_id = proxmox_virtual_environment_download_file.ubuntu_template.id
-    type            = "ubuntu"
+    type             = "ubuntu"
   }
-  
+
   cpu {
     cores = var.k3s_controller_cores
   }
-  
+
   memory {
     dedicated = var.k3s_controller_memory
     swap      = 0
   }
-  
+
   disk {
     datastore_id = var.storage_pool
     size         = parseint(regex("^([0-9]+)", var.k3s_controller_disk_size)[0], 10)
   }
-  
+
   features {
     nesting = true
   }
-  
+
   console {
     enabled   = true
     type      = "console"
     tty_count = 2
   }
-  
+
   # Run as privileged container for k3s
   unprivileged = false
-  
+
   startup {
     order      = 1
     up_delay   = 30
     down_delay = 30
   }
-  
+
   tags = ["k3s", "controller"]
-  
-  started = false  # Start after configuration
+
+  started = false # Created stopped; configure_lxc_controller applies LXC config then starts it
+
+  # The container is started out-of-band by null_resource.configure_lxc_controller
+  # (pct start). Ignore subsequent `started` drift so Terraform never tries to
+  # stop a healthy, running node on later applies.
+  lifecycle {
+    ignore_changes = [started]
+  }
 }
 
 # k3s Worker Nodes
 resource "proxmox_virtual_environment_container" "k3s_workers" {
   count = var.k3s_worker_count
-  
+
   description = "k3s Worker Node ${count.index + 1}"
   node_name   = var.proxmox_node
   vm_id       = var.k3s_worker_vmid_start + count.index
-  
+
   initialization {
     hostname = format("%s%02d", var.k3s_worker_hostname_prefix, count.index + 1)
-    
+
     ip_config {
       ipv4 {
         address = "${var.k3s_worker_ips[count.index]}/24"
         gateway = var.gateway
       }
     }
-    
+
     dns {
       servers = [var.nameserver]
     }
-    
+
     user_account {
       keys     = [var.ssh_public_key]
       password = var.root_password
     }
   }
-  
+
   network_interface {
     name   = "eth0"
     bridge = var.network_bridge
   }
-  
+
   operating_system {
     template_file_id = proxmox_virtual_environment_download_file.ubuntu_template.id
-    type            = "ubuntu"
+    type             = "ubuntu"
   }
-  
+
   cpu {
     cores = var.k3s_worker_cores
   }
-  
+
   memory {
     dedicated = var.k3s_worker_memory
     swap      = 0
   }
-  
+
   disk {
     datastore_id = var.storage_pool
     size         = parseint(regex("^([0-9]+)", var.k3s_worker_disk_size)[0], 10)
   }
-  
+
   features {
     nesting = true
   }
-  
+
   console {
     enabled   = true
     type      = "console"
     tty_count = 2
   }
-  
+
   # Run as privileged container for k3s
   unprivileged = false
-  
+
   startup {
     order      = 2
     up_delay   = 30
     down_delay = 30
   }
-  
+
   tags = ["k3s", "worker"]
-  
-  started = false  # Start after configuration
-  
+
+  started = false # Created stopped; configure_lxc_workers applies LXC config then starts it
+
   depends_on = [proxmox_virtual_environment_container.k3s_controller]
+
+  # Started out-of-band by null_resource.configure_lxc_workers (pct start).
+  # Ignore `started` drift so later applies don't try to stop running nodes.
+  lifecycle {
+    ignore_changes = [started]
+  }
 }
 
 # Apply additional LXC configuration directly via SSH
 resource "null_resource" "configure_lxc_controller" {
   depends_on = [proxmox_virtual_environment_container.k3s_controller]
-  
+
   provisioner "local-exec" {
     command = <<-EOT
       ssh -o StrictHostKeyChecking=no ${var.proxmox_ssh_user}@${replace(replace(var.proxmox_api_url, "https://", ""), ":8006", "")} \
@@ -198,7 +211,7 @@ resource "null_resource" "configure_lxc_controller" {
          pct exec ${var.k3s_controller_vmid} -- bash -c 'DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y openssh-server && sed -i \"s/#PermitRootLogin prohibit-password/PermitRootLogin yes/\" /etc/ssh/sshd_config && sed -i \"s/PasswordAuthentication no/PasswordAuthentication yes/\" /etc/ssh/sshd_config && systemctl enable ssh && systemctl restart ssh'"
     EOT
   }
-  
+
   provisioner "local-exec" {
     when    = destroy
     command = "echo 'Controller config cleanup'"
@@ -207,9 +220,9 @@ resource "null_resource" "configure_lxc_controller" {
 
 resource "null_resource" "configure_lxc_workers" {
   count = var.k3s_worker_count
-  
+
   depends_on = [proxmox_virtual_environment_container.k3s_workers]
-  
+
   provisioner "local-exec" {
     command = <<-EOT
       ssh -o StrictHostKeyChecking=no ${var.proxmox_ssh_user}@${replace(replace(var.proxmox_api_url, "https://", ""), ":8006", "")} \
@@ -223,7 +236,7 @@ resource "null_resource" "configure_lxc_workers" {
          pct exec ${var.k3s_worker_vmid_start + count.index} -- bash -c 'DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y openssh-server && sed -i \"s/#PermitRootLogin prohibit-password/PermitRootLogin yes/\" /etc/ssh/sshd_config && sed -i \"s/PasswordAuthentication no/PasswordAuthentication yes/\" /etc/ssh/sshd_config && systemctl enable ssh && systemctl restart ssh'"
     EOT
   }
-  
+
   provisioner "local-exec" {
     when    = destroy
     command = "echo 'Worker config cleanup'"
@@ -235,13 +248,14 @@ resource "null_resource" "install_k3s_controller" {
   depends_on = [
     null_resource.configure_lxc_controller
   ]
-  
+
   provisioner "local-exec" {
     command = <<-EOT
       echo "Waiting for SSH to be ready..."
       sleep 45
       echo "Installing k3s on controller..."
       sshpass -p '${var.root_password}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR root@${var.k3s_controller_ip} bash << 'ENDSSH'
+        set -eo pipefail
         apt-get update
         curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=${var.k3s_version} K3S_TOKEN=${local.k3s_token} INSTALL_K3S_SKIP_START=true sh -s - server --disable=traefik --write-kubeconfig-mode=644
         sed -i '/ExecStartPre=.*modprobe/d' /etc/systemd/system/k3s.service
@@ -249,19 +263,28 @@ resource "null_resource" "install_k3s_controller" {
         systemctl enable k3s
         systemctl start k3s
         echo "Waiting for k3s to be ready..."
+        ready=false
         for i in {1..60}; do
-          if systemctl is-active --quiet k3s; then
-            echo "k3s service is active"
-            if kubectl get nodes 2>/dev/null; then
-              echo "k3s is fully operational"
-              break
-            fi
+          if systemctl is-active --quiet k3s && kubectl get nodes 2>/dev/null; then
+            echo "k3s is fully operational"
+            ready=true
+            break
           fi
           echo "Waiting... ($i/60)"
           sleep 5
         done
-        systemctl status k3s --no-pager -l || true
-        kubectl get nodes || true
+        # Verify the install actually succeeded — fail the apply if not
+        if ! command -v k3s >/dev/null 2>&1; then
+          echo "ERROR: k3s binary not found on controller after install" >&2
+          exit 1
+        fi
+        if [ "$ready" != "true" ] || ! systemctl is-active --quiet k3s; then
+          echo "ERROR: k3s service did not become ready on controller" >&2
+          systemctl status k3s --no-pager -l || true
+          exit 1
+        fi
+        echo "k3s controller verified: $(k3s --version | head -1)"
+        kubectl get nodes
 ENDSSH
     EOT
   }
@@ -270,18 +293,19 @@ ENDSSH
 # Install k3s on workers
 resource "null_resource" "install_k3s_workers" {
   count = var.k3s_worker_count
-  
+
   depends_on = [
     null_resource.configure_lxc_workers,
     null_resource.install_k3s_controller
   ]
-  
+
   provisioner "local-exec" {
     command = <<-EOT
       echo "Waiting for SSH to be ready..."
       sleep 45
       echo "Installing k3s on worker ${count.index + 1}..."
       sshpass -p '${var.root_password}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR root@${var.k3s_worker_ips[count.index]} bash << 'ENDSSH'
+        set -eo pipefail
         apt-get update
         curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=${var.k3s_version} K3S_URL=https://${var.k3s_controller_ip}:6443 K3S_TOKEN=${local.k3s_token} INSTALL_K3S_SKIP_START=true sh -
         sed -i '/ExecStartPre=.*modprobe/d' /etc/systemd/system/k3s-agent.service
@@ -290,6 +314,17 @@ resource "null_resource" "install_k3s_workers" {
         systemctl start k3s-agent
         echo "Worker ${count.index + 1} k3s-agent started"
         sleep 20
+        # Verify the install actually succeeded — fail the apply if not
+        if ! command -v k3s >/dev/null 2>&1; then
+          echo "ERROR: k3s binary not found on worker ${count.index + 1} after install" >&2
+          exit 1
+        fi
+        if ! systemctl is-active --quiet k3s-agent; then
+          echo "ERROR: k3s-agent not active on worker ${count.index + 1}" >&2
+          systemctl status k3s-agent --no-pager -l || true
+          exit 1
+        fi
+        echo "Worker ${count.index + 1} verified: $(k3s --version | head -1)"
 ENDSSH
     EOT
   }
